@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "DevX New Tab Page",
+  "version": "0.0.0.1",
+  "description": "A convenient new tab page for searching tabs, bookmarks, and more.",
+  "icons": {
+    "16": "Frame 1.png",
+    "48": "Frame 2.png",
+    "128": "Frame 3.png"
+  },
+  "permissions": [
+    "tabs",
+    "storage",
+    "bookmarks"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "chrome_url_overrides": {
+    "newtab": "newTab.html"
+  }
+} 
