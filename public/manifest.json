@@ -4,18 +4,16 @@
   "version": "0.0.0.1",
   "description": "A convenient new tab page for searching tabs, bookmarks, and more.",
   "icons": {
-    "16": "Frame 1.png",
-    "48": "Frame 2.png",
-    "128": "Frame 3.png"
+    "16": "Frame 7.png",
+    "48": "Frame 8.png",
+    "128": "Frame 9.png"
   },
   "permissions": [
     "tabs",
     "storage",
-    "bookmarks"
+    "bookmarks",
+    "search"
   ],
-  "action": {
-    "default_popup": "popup.html"
-  },
   "chrome_url_overrides": {
     "newtab": "newTab.html"
   }
