@@ -1,8 +1,8 @@
 {
-  "name": "NewTab",
-  "version": "1.0.0",
-  "description": "",
-  "main": "background.js",
+  "name": "newtab-ext",
+  "version": "0.1.0",
+  "description": "Chrome new tab override with tab/bookmark/history search, workspaces, and per-URL notes.",
+  "private": true,
   "scripts": {
     "build": "webpack --mode production",
     "dev": "webpack --mode development --watch"

@@ -22,25 +22,34 @@ const faviconUrl = (pageUrl) => {
 };
 
 const openInCurrentTab = async (url) => {
+  const safe = normalizeUrl(url);
+  if (!safe) return;
   const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (currentTab) chrome.tabs.update(currentTab.id, { url });
+  if (currentTab) chrome.tabs.update(currentTab.id, { url: safe });
 };
 
 const goToOrOpen = (url) => {
+  const safe = normalizeUrl(url);
+  if (!safe) return;
   chrome.tabs.query({}, (tabs) => {
-    const existing = tabs.find(t => t.url === url);
+    const existing = tabs.find(t => t.url === safe);
     if (existing) {
       chrome.tabs.update(existing.id, { active: true });
       if (existing.windowId != null) chrome.windows.update(existing.windowId, { focused: true });
     } else {
-      openInCurrentTab(url);
+      openInCurrentTab(safe);
     }
   });
 };
 
 const normalizeUrl = (url) => {
   if (!url) return '';
-  return /^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`;
+  const trimmed = String(url).trim();
+  if (!trimmed) return '';
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed)) {
+    return /^https?:\/\//i.test(trimmed) ? trimmed : '';
+  }
+  return `https://${trimmed}`;
 };
 
 const hostnameOf = (url) => {

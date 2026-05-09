@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "DevX New Tab Page",
-  "version": "0.0.0.1",
-  "description": "A convenient new tab page for searching tabs, bookmarks, and more.",
+  "name": "DevX New Tab",
+  "version": "0.1.0",
+  "description": "Keyboard-first new tab: fuzzy-search open tabs, bookmarks, and recently closed; save workspaces; attach notes to URLs.",
   "icons": {
     "16": "Frame 7.png",
     "48": "Frame 8.png",
