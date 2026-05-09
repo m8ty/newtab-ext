@@ -331,6 +331,19 @@ const NewTab = () => {
           </span>
 
         </div>
+
+        <div
+          onClick={() => focusOrOpen('claude.ai', 'https://claude.ai/new')}>
+
+          <img src="claude.png" style={{
+            width: '32px',
+            height: '32px'
+          }} />
+          <span style={{ color: 'white' }}>
+            Claude
+          </span>
+
+        </div>
       </div>
 
     </div>
