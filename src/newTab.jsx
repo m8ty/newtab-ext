@@ -2,15 +2,38 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Fzf } from 'fzf';
 
+const faviconUrl = (pageUrl) => {
+  const url = new URL(chrome.runtime.getURL('/_favicon/'));
+  url.searchParams.set('pageUrl', pageUrl);
+  url.searchParams.set('size', '32');
+  return url.toString();
+};
+
+const openInCurrentTab = async (url) => {
+  const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (currentTab) chrome.tabs.update(currentTab.id, { url });
+};
+
+const hostnameOf = (url) => {
+  try { return new URL(url).hostname; } catch { return ''; }
+};
+
+const focusOrOpen = (matchHost, openUrl) => {
+  chrome.tabs.query({ currentWindow: true }, (tabs) => {
+    const existing = tabs.find(t => t.url && hostnameOf(t.url).endsWith(matchHost));
+    if (existing) chrome.tabs.update(existing.id, { active: true });
+    else chrome.tabs.create({ url: openUrl });
+  });
+};
+
 const NewTab = () => {
   const inputRef = useRef(null);
   const [input, setInput] = useState('');
   const [tabs, setTabs] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [filteredTabs, setFilteredTabs] = useState([]);
-  const [isCtrlKey, setIsCtrlKey] = useState(false);
-  const [bookmarkResults, setBookmarkResults] = useState([]); // New state for bookmark results
-  const [isBookmarkSearch, setIsBookmarkSearch] = useState(false); // Track if it's a bookmark search
+  const [bookmarkResults, setBookmarkResults] = useState([]);
+  const [isBookmarkSearch, setIsBookmarkSearch] = useState(false);
 
   const searchBookmarks = async (query) => {
     chrome.bookmarks.search({ query: query }, (results) => {
@@ -73,51 +96,42 @@ const NewTab = () => {
       if (e.key === '/' &&
         document.activeElement.tagName !== 'INPUT' &&
         document.activeElement.tagName !== 'TEXTAREA') {
-        e.preventDefault(); // Prevent "/" from being typed in the input
+        e.preventDefault();
         inputRef.current?.focus();
+        return;
       }
 
-      if (document.activeElement === inputRef.current) {
-        if (e.key === 'Escape') {
-          setInput('');
-          inputRef.current.blur();
-        } else if (e.key === 'Enter') {
-          if (e.ctrlKey && e.shiftKey) {
-            // Ctrl+Shift+Enter for Brave search
-            handleSearch('brave');
-          } else if (e.ctrlKey) {
-            // Ctrl+Enter for Google search
-            handleSearch('google');
-          } else if (filteredTabs.length > 0) {
-            // Regular Enter for selecting tab
-            const selectedTab = filteredTabs[selectedIndex];
-            chrome.tabs.update(selectedTab.item.id, { active: true });
-          } else if (isBookmarkSearch && bookmarkResults.length > 0) {  //Handle selecting a bookmark
-            const selectedBookmark = bookmarkResults[selectedIndex];
-            chrome.tabs.update({ url: selectedBookmark.url }); //Open bookmark in current tab
-          }
-          else {
-            // If no tabs match, default to Google search
-            handleSearch('google');
-          }
-        }
-      }
-      else if (e.key === 'ArrowDown' || (isCtrlKey && e.key === 'J')) {
+      if (document.activeElement !== inputRef.current) return;
+
+      const activeList = isBookmarkSearch ? bookmarkResults : filteredTabs;
+
+      if (e.key === 'Escape') {
+        setInput('');
+        inputRef.current.blur();
+      } else if (e.key === 'ArrowDown' || (e.ctrlKey && (e.key === 'j' || e.key === 'J'))) {
         e.preventDefault();
-        setSelectedIndex(prev =>
-          prev < filteredTabs.length - 1 ? prev + 1 : prev
-        );
-      } else if (e.key === 'ArrowUp' || (isCtrlKey && e.key === 'K')) {
+        setSelectedIndex(prev => prev < activeList.length - 1 ? prev + 1 : prev);
+      } else if (e.key === 'ArrowUp' || (e.ctrlKey && (e.key === 'k' || e.key === 'K'))) {
         e.preventDefault();
         setSelectedIndex(prev => prev > 0 ? prev - 1 : 0);
+      } else if (e.key === 'Enter') {
+        if (e.ctrlKey && e.shiftKey) {
+          handleSearch('brave');
+        } else if (e.ctrlKey) {
+          handleSearch('google');
+        } else if (!isBookmarkSearch && filteredTabs.length > 0) {
+          chrome.tabs.update(filteredTabs[selectedIndex].item.id, { active: true });
+        } else if (isBookmarkSearch && bookmarkResults.length > 0) {
+          openInCurrentTab(bookmarkResults[selectedIndex].url);
+        } else {
+          handleSearch('google');
+        }
       }
-    }
+    };
 
     document.addEventListener('keydown', handleKeyPress);
-    return () => {
-      document.removeEventListener('keydown', handleKeyPress);
-    };
-  }, [filteredTabs, selectedIndex, input, isBookmarkSearch]);
+    return () => document.removeEventListener('keydown', handleKeyPress);
+  }, [filteredTabs, bookmarkResults, selectedIndex, input, isBookmarkSearch]);
 
   // Update filtered results when input changes
   useEffect(() => {
@@ -136,30 +150,6 @@ const NewTab = () => {
     setFilteredTabs(results);
     setSelectedIndex(0);
   }, [input, tabs, isBookmarkSearch]);
-
-  //   const [isCtrlKey, setIsCtrlKey] = useState(false);
-
-  useEffect(() => {
-    const handleKeyup = (e) => {
-      if (e.key === 'Control') {
-        e.preventDefault();
-        setIsCtrlKey(true);
-
-        setTimeout(() => setIsCtrlKey(false), 1000);
-
-      }
-    }
-
-    const handleKeydown = (e) => {
-      if (e.key === 'Control') {
-        e.preventDefault();
-        setIsCtrlKey(true);
-      }
-    }
-
-    window.addEventListener('keyup', handleKeyup);
-    // window.addEventListener('keydown', );
-  })
 
   return (
     <div style={{
@@ -214,12 +204,10 @@ const NewTab = () => {
                   alignItems: 'center',
                   gap: '12px'
                 }}
-                onClick={() => {
-                  chrome.tabs.update({ url: bookmark.url }); //Open bookmark in current tab
-                }}
+                onClick={() => openInCurrentTab(bookmark.url)}
               >
                 <img
-                  src={'chrome://favicon/size/16@2x/' + bookmark.url}
+                  src={faviconUrl(bookmark.url)}
                   style={{
                     width: 16,
                     height: 16,
@@ -274,7 +262,7 @@ const NewTab = () => {
                 }}
               >
                 <img
-                  src={result.item.favIconUrl || 'chrome://favicon/size/16@2x'}
+                  src={result.item.favIconUrl || faviconUrl(result.item.url)}
                   style={{
                     width: 16,
                     height: 16,
@@ -318,16 +306,7 @@ const NewTab = () => {
       >
 
         <div
-          onClick={() => {
-            chrome.tabs.query({ currentWindow: true }, (tabs) => {
-              const chatGptTab = tabs.find(tab => tab.url.includes('https://www.chatgpt.com'));
-              if (chatGptTab) {
-                chrome.tabs.update(chatGptTab.id, { active: true });
-              } else {
-                chrome.tabs.create({ url: 'https://chatgpt.com' });
-              }
-            });
-          }}>
+          onClick={() => focusOrOpen('chatgpt.com', 'https://chatgpt.com')}>
 
           <img src="chatgpt.png" style={{
             width: '32px',
@@ -340,16 +319,7 @@ const NewTab = () => {
         </div>
 
         <div
-          onClick={() => {
-            chrome.tabs.query({ currentWindow: true }, (tabs) => {
-              const perplexityTab = tabs.find(tab => tab.url.includes('https://www.perplexity.ai'));
-              if (perplexityTab) {
-                chrome.tabs.update(perplexityTab.id, { active: true });
-              } else {
-                chrome.tabs.create({ url: 'https://perplexity.ai' });
-              }
-            });
-          }}>
+          onClick={() => focusOrOpen('perplexity.ai', 'https://perplexity.ai')}>
 
           <img src="perplexity.png" style={{
             width: '32px',

@@ -10,9 +10,8 @@
   },
   "permissions": [
     "tabs",
-    "storage",
     "bookmarks",
-    "search"
+    "favicon"
   ],
   "chrome_url_overrides": {
     "newtab": "newTab.html"
