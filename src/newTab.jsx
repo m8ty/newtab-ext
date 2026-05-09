@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Fzf } from 'fzf';
+import { loadLinks, loadFrecency, frecencyScore } from './storage';
 
 const faviconUrl = (pageUrl) => {
   const url = new URL(chrome.runtime.getURL('/_favicon/'));
@@ -19,6 +20,7 @@ const hostnameOf = (url) => {
 };
 
 const focusOrOpen = (matchHost, openUrl) => {
+  if (!matchHost) { chrome.tabs.create({ url: openUrl }); return; }
   chrome.tabs.query({ currentWindow: true }, (tabs) => {
     const existing = tabs.find(t => t.url && hostnameOf(t.url).endsWith(matchHost));
     if (existing) chrome.tabs.update(existing.id, { active: true });
@@ -26,20 +28,40 @@ const focusOrOpen = (matchHost, openUrl) => {
   });
 };
 
+const isShowable = (tab) => /^https?:/.test(tab?.url || '');
+
 const NewTab = () => {
   const inputRef = useRef(null);
   const [input, setInput] = useState('');
+  const [mode, setMode] = useState('tabs'); // 'tabs' | 'bookmarks' | 'recent'
   const [tabs, setTabs] = useState([]);
+  const [frecency, setFrecency] = useState({});
+  const [bookmarkResults, setBookmarkResults] = useState([]);
+  const [recentSessions, setRecentSessions] = useState([]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [filteredTabs, setFilteredTabs] = useState([]);
-  const [bookmarkResults, setBookmarkResults] = useState([]);
-  const [isBookmarkSearch, setIsBookmarkSearch] = useState(false);
+  const [quickLinks, setQuickLinks] = useState([]);
 
-  const searchBookmarks = async (query) => {
-    chrome.bookmarks.search({ query: query }, (results) => {
-      setBookmarkResults(results);
-      setFilteredTabs([]); // Clear tab results when showing bookmarks
-      setIsBookmarkSearch(true);
+  useEffect(() => {
+    setTimeout(() => inputRef.current?.focus(), 200);
+  }, []);
+
+  useEffect(() => {
+    chrome.tabs.query({ currentWindow: true }).then(setTabs);
+    loadFrecency().then(setFrecency);
+    loadLinks().then(setQuickLinks);
+    chrome.sessions.getRecentlyClosed({ maxResults: 25 }, (sessions) => {
+      const tabsOnly = (sessions || [])
+        .map(s => s.tab)
+        .filter(Boolean)
+        .filter(t => isShowable(t));
+      setRecentSessions(tabsOnly);
+    });
+  }, []);
+
+  const searchBookmarks = (query) => {
+    chrome.bookmarks.search({ query }, (results) => {
+      setBookmarkResults((results || []).filter(r => r.url));
     });
   };
 
@@ -48,51 +70,109 @@ const NewTab = () => {
     setInput(value);
 
     if (value.startsWith('@b ')) {
-      const bookmarkQuery = value.substring(3); // Extract the query after "@b "
-      searchBookmarks(bookmarkQuery);
-      setIsBookmarkSearch(true);
+      setMode('bookmarks');
+      searchBookmarks(value.slice(3));
+    } else if (value === '@r' || value.startsWith('@r ')) {
+      setMode('recent');
     } else {
-      setIsBookmarkSearch(false);
-      setBookmarkResults([]); // Clear bookmark results if not a bookmark search
+      setMode('tabs');
     }
   };
-
-  useEffect(() => {
-    // Delay focus shift to allow Chrome to first focus the address bar
-    setTimeout(() => {
-      if (inputRef.current) {
-        inputRef.current.focus();
-      }
-    }, 200);
-  }, []);
-
-
-  useEffect(() => {
-    // Load initial tabs
-    chrome.tabs.query({ currentWindow: true }).then(setTabs);
-  }, []);
 
   const handleSearch = async (searchEngine) => {
     if (!input.trim()) return;
-
     const searchUrls = {
       google: `https://www.google.com/search?q=${encodeURIComponent(input)}`,
-      brave: `https://search.brave.com/search?q=${encodeURIComponent(input)}`
+      brave: `https://search.brave.com/search?q=${encodeURIComponent(input)}`,
     };
-
     const url = searchUrls[searchEngine];
-    if (url) {
-      // Get current tab
-      const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      // Update current tab's URL
-      chrome.tabs.update(currentTab.id, { url });
-      setInput('');
-    }
+    if (!url) return;
+    await openInCurrentTab(url);
+    setInput('');
   };
+
+  // Compute fzf-filtered tab results
+  useEffect(() => {
+    if (mode !== 'tabs' || !input.trim()) { setFilteredTabs([]); return; }
+    const fzf = new Fzf(tabs.filter(isShowable), {
+      selector: (item) => `${item.title} ${item.url}`,
+      tiebreakers: [(a, b) => a.item.title.length - b.item.title.length],
+    });
+    setFilteredTabs(fzf.find(input));
+  }, [input, tabs, mode]);
+
+  // Frecency-sorted default tab list (shown when input is empty)
+  const frecencyDefaults = useMemo(() => {
+    const rank = (t) => {
+      const f = frecencyScore(t.url, frecency);
+      if (f > 0) return f;
+      if (t.lastAccessed) {
+        const hoursAgo = (Date.now() - t.lastAccessed) / 3600000;
+        return Math.exp(-hoursAgo / 48) * 0.001;
+      }
+      return 0;
+    };
+    return tabs
+      .filter(isShowable)
+      .filter(t => !t.active)
+      .sort((a, b) => rank(b) - rank(a))
+      .slice(0, 8);
+  }, [tabs, frecency]);
+
+  // Filter recent sessions by query (after `@r `)
+  const recentFiltered = useMemo(() => {
+    if (mode !== 'recent') return [];
+    const q = input.startsWith('@r ') ? input.slice(3).trim() : '';
+    if (!q) return recentSessions;
+    const fzf = new Fzf(recentSessions, {
+      selector: (item) => `${item.title || ''} ${item.url || ''}`,
+    });
+    return fzf.find(q).map(r => r.item);
+  }, [input, mode, recentSessions]);
+
+  // Unified items list for the dropdown — same shape regardless of mode
+  const items = useMemo(() => {
+    if (mode === 'bookmarks') {
+      return bookmarkResults.map(b => ({
+        key: 'b-' + b.id,
+        title: b.title || b.url,
+        subtitle: b.url,
+        icon: faviconUrl(b.url),
+        onSelect: () => openInCurrentTab(b.url),
+      }));
+    }
+    if (mode === 'recent') {
+      return recentFiltered.map(r => ({
+        key: 'r-' + r.sessionId,
+        title: r.title || r.url,
+        subtitle: r.url,
+        icon: r.favIconUrl || faviconUrl(r.url),
+        onSelect: () => chrome.sessions.restore(r.sessionId),
+      }));
+    }
+    if (input.trim()) {
+      return filteredTabs.map(r => ({
+        key: 't-' + r.item.id,
+        title: r.item.title,
+        subtitle: r.item.url,
+        icon: r.item.favIconUrl || faviconUrl(r.item.url),
+        onSelect: () => chrome.tabs.update(r.item.id, { active: true }),
+      }));
+    }
+    return frecencyDefaults.map(t => ({
+      key: 't-' + t.id,
+      title: t.title,
+      subtitle: t.url,
+      icon: t.favIconUrl || faviconUrl(t.url),
+      onSelect: () => chrome.tabs.update(t.id, { active: true }),
+    }));
+  }, [mode, input, bookmarkResults, recentFiltered, filteredTabs, frecencyDefaults]);
+
+  // Reset selection when items change
+  useEffect(() => { setSelectedIndex(0); }, [items.length, mode]);
 
   useEffect(() => {
     const handleKeyPress = (e) => {
-      // Focus input when "/" is pressed, unless we're already in an input/textarea
       if (e.key === '/' &&
         document.activeElement.tagName !== 'INPUT' &&
         document.activeElement.tagName !== 'TEXTAREA') {
@@ -103,53 +183,29 @@ const NewTab = () => {
 
       if (document.activeElement !== inputRef.current) return;
 
-      const activeList = isBookmarkSearch ? bookmarkResults : filteredTabs;
-
       if (e.key === 'Escape') {
         setInput('');
+        setMode('tabs');
         inputRef.current.blur();
       } else if (e.key === 'ArrowDown' || (e.ctrlKey && (e.key === 'j' || e.key === 'J'))) {
         e.preventDefault();
-        setSelectedIndex(prev => prev < activeList.length - 1 ? prev + 1 : prev);
+        setSelectedIndex(prev => prev < items.length - 1 ? prev + 1 : prev);
       } else if (e.key === 'ArrowUp' || (e.ctrlKey && (e.key === 'k' || e.key === 'K'))) {
         e.preventDefault();
         setSelectedIndex(prev => prev > 0 ? prev - 1 : 0);
       } else if (e.key === 'Enter') {
-        if (e.ctrlKey && e.shiftKey) {
-          handleSearch('brave');
-        } else if (e.ctrlKey) {
-          handleSearch('google');
-        } else if (!isBookmarkSearch && filteredTabs.length > 0) {
-          chrome.tabs.update(filteredTabs[selectedIndex].item.id, { active: true });
-        } else if (isBookmarkSearch && bookmarkResults.length > 0) {
-          openInCurrentTab(bookmarkResults[selectedIndex].url);
-        } else {
-          handleSearch('google');
-        }
+        if (e.ctrlKey && e.shiftKey) handleSearch('brave');
+        else if (e.ctrlKey) handleSearch('google');
+        else if (items.length > 0) items[selectedIndex]?.onSelect();
+        else handleSearch('google');
       }
     };
 
     document.addEventListener('keydown', handleKeyPress);
     return () => document.removeEventListener('keydown', handleKeyPress);
-  }, [filteredTabs, bookmarkResults, selectedIndex, input, isBookmarkSearch]);
+  }, [items, selectedIndex, input]);
 
-  // Update filtered results when input changes
-  useEffect(() => {
-    if (!input || isBookmarkSearch) {
-      setFilteredTabs([]);
-      setSelectedIndex(0);
-      return;
-    }
-
-    const fzf = new Fzf(tabs, {
-      selector: (item) => `${item.title} ${item.url}`,
-      tiebreakers: [(a, b) => b.item.title.length - a.item.title.length]
-    });
-
-    const results = fzf.find(input);
-    setFilteredTabs(results);
-    setSelectedIndex(0);
-  }, [input, tabs, isBookmarkSearch]);
+  const inputBg = mode === 'tabs' ? '#eef3e0' : 'white';
 
   return (
     <div style={{
@@ -159,19 +215,15 @@ const NewTab = () => {
       alignItems: 'center',
       padding: '48px 20px',
       backgroundColor: '#000000',
-      justifyContent: 'center'
+      justifyContent: 'center',
     }}>
-      <div style={{
-        width: '100%',
-        maxWidth: '600px',
-      }}>
+      <div style={{ width: '100%', maxWidth: '600px' }}>
         <input
           ref={inputRef}
           type="text"
           value={input}
-          // onChange={(e) => setInput(e.target.value)}
           onChange={handleInputChange}
-          placeholder='Search tabs (Focus with /) or web (Ctrl+Enter for Google, Ctrl+Shift+Enter for Brave)'
+          placeholder="Search tabs · @b bookmarks · @r recently closed · Ctrl+Enter web · / to focus"
           style={{
             width: '100%',
             padding: '12px 20px',
@@ -181,112 +233,49 @@ const NewTab = () => {
             outline: 'none',
             boxShadow: '0 2px 5px rgba(0,0,0,0.1)',
             marginBottom: '12px',
-            backgroundColor: isBookmarkSearch ? 'white' : '#eef3e0',
-            color: isBookmarkSearch ? 'black' : 'black'
+            backgroundColor: inputBg,
+            color: 'black',
           }}
           autoFocus
         />
-        {isBookmarkSearch && bookmarkResults.length > 0 && (
-          <div style={{
-            backgroundColor: 'white',
-            borderRadius: '12px',
-            boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-            overflow: 'hidden'
-          }}>
-            {bookmarkResults.map((bookmark, index) => (
-              <div
-                key={bookmark.id}
-                style={{
-                  padding: '12px 16px',
-                  cursor: 'pointer',
-                  backgroundColor: index === selectedIndex ? '#f0f0f0' : '#fff',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '12px'
-                }}
-                onClick={() => openInCurrentTab(bookmark.url)}
-              >
-                <img
-                  src={faviconUrl(bookmark.url)}
-                  style={{
-                    width: 16,
-                    height: 16,
-                    flexShrink: 0
-                  }}
-                  alt=""
-                />
-                <div style={{
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap'
-                }}>
-                  <div style={{
-                    fontSize: '14px',
-                    fontWeight: 500,
-                    marginBottom: '2px'
-                  }}>
-                    {bookmark.title}
-                  </div>
-                  <div style={{
-                    fontSize: '12px',
-                    color: '#666',
-                  }}>
-                    {bookmark.url}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
 
-        {!isBookmarkSearch && filteredTabs.length > 0 && (
+        {items.length > 0 && (
           <div style={{
             backgroundColor: 'white',
             borderRadius: '12px',
             boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-            overflow: 'hidden'
+            overflow: 'hidden',
           }}>
-            {filteredTabs.map((result, index) => (
+            {items.map((it, index) => (
               <div
-                key={result.item.id}
+                key={it.key}
                 style={{
                   padding: '12px 16px',
                   cursor: 'pointer',
                   backgroundColor: index === selectedIndex ? '#f0f0f0' : 'transparent',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '12px'
+                  gap: '12px',
                 }}
-                onClick={() => {
-                  chrome.tabs.update(result.item.id, { active: true });
-                }}
+                onClick={it.onSelect}
               >
                 <img
-                  src={result.item.favIconUrl || faviconUrl(result.item.url)}
-                  style={{
-                    width: 16,
-                    height: 16,
-                    flexShrink: 0
-                  }}
+                  src={it.icon}
+                  style={{ width: 16, height: 16, flexShrink: 0 }}
                   alt=""
                 />
                 <div style={{
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap'
+                  whiteSpace: 'nowrap',
+                  minWidth: 0,
+                  flex: 1,
                 }}>
-                  <div style={{
-                    fontSize: '14px',
-                    fontWeight: 500,
-                    marginBottom: '2px'
-                  }}>
-                    {result.item.title}
+                  <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '2px' }}>
+                    {it.title}
                   </div>
-                  <div style={{
-                    fontSize: '12px',
-                    color: '#666',
-                  }}>
-                    {result.item.url}
+                  <div style={{ fontSize: '12px', color: '#666' }}>
+                    {it.subtitle}
                   </div>
                 </div>
               </div>
@@ -301,51 +290,31 @@ const NewTab = () => {
         alignItems: 'center',
         gap: '12px',
         justifyContent: 'center',
-
-      }}
-      >
-
-        <div
-          onClick={() => focusOrOpen('chatgpt.com', 'https://chatgpt.com')}>
-
-          <img src="chatgpt.png" style={{
-            width: '32px',
-            height: '32px'
-          }} />
-          <span style={{ color: 'white' }}>
-            ChatGpt
-          </span>
-
-        </div>
-
-        <div
-          onClick={() => focusOrOpen('perplexity.ai', 'https://perplexity.ai')}>
-
-          <img src="perplexity.png" style={{
-            width: '32px',
-            height: '32px'
-          }} />
-          <span style={{ color: 'white' }}>
-
-            Perplexity
-          </span>
-
-        </div>
-
-        <div
-          onClick={() => focusOrOpen('claude.ai', 'https://claude.ai/new')}>
-
-          <img src="claude.png" style={{
-            width: '32px',
-            height: '32px'
-          }} />
-          <span style={{ color: 'white' }}>
-            Claude
-          </span>
-
-        </div>
+        marginTop: 24,
+        flexWrap: 'wrap',
+      }}>
+        {quickLinks.map((link) => (
+          <div
+            key={link.id || link.url}
+            onClick={() => focusOrOpen(link.host || hostnameOf(link.url), link.url)}
+            style={{
+              cursor: 'pointer',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 4,
+              padding: 8,
+            }}
+          >
+            <img
+              src={link.icon || faviconUrl(link.url)}
+              style={{ width: 32, height: 32 }}
+              alt=""
+            />
+            <span style={{ color: 'white', fontSize: 13 }}>{link.name}</span>
+          </div>
+        ))}
       </div>
-
     </div>
   );
 };

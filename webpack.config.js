@@ -3,7 +3,8 @@ const CopyPlugin = require('copy-webpack-plugin');
 
 module.exports = {
   entry: {
-    newTab: './src/newTab.jsx'
+    newTab: './src/newTab.jsx',
+    options: './src/options.jsx'
   },
   output: {
     path: path.resolve(__dirname, 'dist'),

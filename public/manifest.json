@@ -11,9 +11,15 @@
   "permissions": [
     "tabs",
     "bookmarks",
-    "favicon"
+    "favicon",
+    "storage",
+    "sessions"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_page": "options.html",
   "chrome_url_overrides": {
     "newtab": "newTab.html"
   }
-} 
+}
